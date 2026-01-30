@@ -50,9 +50,22 @@ async function walkDir(dir: string, files: string[]) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walkDir(full, files);
-      continue;
+    // Follow symlinks: resolve to real stat to detect directories behind symlinks
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      try {
+        const stat = await fs.stat(full);
+        if (stat.isDirectory()) {
+          await walkDir(full, files);
+          continue;
+        }
+        if (!stat.isFile()) continue;
+        if (!entry.name.endsWith(".md")) continue;
+        files.push(full);
+        continue;
+      } catch {
+        // Broken symlink — skip
+        continue;
+      }
     }
     if (!entry.isFile()) continue;
     if (!entry.name.endsWith(".md")) continue;
