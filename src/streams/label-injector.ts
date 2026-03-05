@@ -58,7 +58,7 @@ export async function classifyAndLabel(
         confidence: classification.confidence,
         latencyMs: classification.latencyMs,
       });
-      return { label: null, classification, matchedStream: null };
+      return { label: "📌 _Nieuw onderwerp_", classification, matchedStream: null };
     }
 
     const matchedStream = activeStreams[classification.streamIndex];
