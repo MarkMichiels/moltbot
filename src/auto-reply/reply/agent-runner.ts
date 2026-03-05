@@ -24,6 +24,7 @@ import {
   classifyAndLabel,
   postReplyStreamUpdate,
   prependStreamLabel,
+  type StreamLabelResult,
 } from "../../streams/label-injector.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import {
@@ -33,7 +34,7 @@ import {
 } from "../fallback-state.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type { BlockReplyContext, GetReplyOptions, ReplyPayload } from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
   createShouldEmitToolOutput,
@@ -395,13 +396,59 @@ export async function runReplyAgent(params: {
         `Role ordering conflict (${reason}). Restarting session ${sessionKey} -> ${nextSessionId}.`,
       cleanupTranscripts: true,
     });
+  // --- Stream classification: start early so label is ready for block streaming ---
+  let streamLabelForReply: string | null = null;
+  let streamLabelResult: StreamLabelResult | null = null;
+  let resolvedStreamDir: string | undefined;
+  const rawUserMessageFull = (
+    sessionCtx.BodyForAgent ??
+    sessionCtx.CommandBody ??
+    sessionCtx.RawBody ??
+    sessionCtx.Body ??
+    ""
+  ).trim();
+  const rawUserMessage = extractUserText(rawUserMessageFull);
+  console.error(
+    `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
+  );
+  if (!isHeartbeat && rawUserMessage && sessionKey) {
+    const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
+      | string
+      | undefined;
+    resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
+    // Fire classification (runs in parallel with model warm-up below)
+    const classifyPromise = classifyAndLabel(resolvedStreamDir, rawUserMessage).catch(() => null);
+    // Await it before model call — Haiku is ~360ms, fast enough
+    streamLabelResult = await classifyPromise;
+    streamLabelForReply = streamLabelResult?.label ?? null;
+  }
+  // Wrap onBlockReply to prepend label to the first chunk
+  let labelPrepended = false;
+  const originalOnBlockReply = opts?.onBlockReply;
+  const effectiveOpts =
+    streamLabelForReply && originalOnBlockReply && opts
+      ? {
+          ...opts,
+          onBlockReply: (payload: ReplyPayload, context?: BlockReplyContext) => {
+            if (!labelPrepended && payload.text?.trim()) {
+              labelPrepended = true;
+              return originalOnBlockReply(
+                { ...payload, text: prependStreamLabel(payload.text, streamLabelForReply) },
+                context,
+              );
+            }
+            return originalOnBlockReply(payload, context);
+          },
+        }
+      : opts;
+
   try {
     const runStartedAt = Date.now();
     const runOutcome = await runAgentTurnWithFallback({
       commandBody,
       followupRun,
       sessionCtx,
-      opts,
+      opts: effectiveOpts,
       typingSignals,
       blockReplyPipeline,
       blockStreamingEnabled,
@@ -752,53 +799,32 @@ export async function runReplyAgent(params: {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
     }
 
-    // Stream label injection (post-processing, non-blocking)
-    // Use raw user message for classification, not the enriched commandBody
-    // which includes metadata, media notes, and other structural context
-    const rawUserMessageFull = (
-      sessionCtx.BodyForAgent ??
-      sessionCtx.CommandBody ??
-      sessionCtx.RawBody ??
-      sessionCtx.Body ??
-      ""
-    ).trim();
-    // Extract actual user text: strip envelope context like
-    // "[Telegram ... ] <media:audio>\nTranscript:\n..." and inbound metadata
-    const rawUserMessage = extractUserText(rawUserMessageFull);
-    console.error(
-      `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey} bodyStart="${rawUserMessageFull.slice(0, 120)}" cmdBody=${!!sessionCtx.CommandBody} rawBody=${!!sessionCtx.RawBody} body=${!!sessionCtx.Body}`,
-    );
-    if (!isHeartbeat && rawUserMessage && sessionKey) {
-      try {
-        const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
-          | string
-          | undefined;
-        const resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
-        const labelResult = await classifyAndLabel(resolvedStreamDir, rawUserMessage);
-        if (labelResult.label && finalPayloads.length > 0) {
-          const first = finalPayloads[0];
-          if (first && typeof first.text === "string" && first.text.trim() !== "") {
-            finalPayloads = [
-              { ...first, text: prependStreamLabel(first.text, labelResult.label) },
-              ...finalPayloads.slice(1),
-            ];
-          }
-        }
+    // Stream label: prepend to final payload only if NOT already prepended via block streaming
+    if (streamLabelForReply && !labelPrepended && finalPayloads.length > 0) {
+      const first = finalPayloads[0];
+      if (first && typeof first.text === "string" && first.text.trim() !== "") {
+        finalPayloads = [
+          { ...first, text: prependStreamLabel(first.text, streamLabelForReply) },
+          ...finalPayloads.slice(1),
+        ];
+      }
+    }
 
-        // Post-reply: create new streams or update existing ones (fire-and-forget)
-        const replyText =
-          finalPayloads
-            .map((p) => p.text ?? "")
-            .filter(Boolean)
-            .join("\n")
-            .slice(0, 500) || "";
-        if (replyText) {
-          postReplyStreamUpdate(resolvedStreamDir, rawUserMessage, replyText, labelResult).catch(
-            () => {},
-          );
-        }
-      } catch {
-        // Stream labeling is best-effort — never block reply delivery
+    // Post-reply: create new streams or update existing ones (fire-and-forget)
+    if (resolvedStreamDir && streamLabelResult) {
+      const replyText =
+        finalPayloads
+          .map((p) => p.text ?? "")
+          .filter(Boolean)
+          .join("\n")
+          .slice(0, 500) || "";
+      if (replyText) {
+        postReplyStreamUpdate(
+          resolvedStreamDir,
+          rawUserMessage,
+          replyText,
+          streamLabelResult,
+        ).catch(() => {});
       }
     }
 
