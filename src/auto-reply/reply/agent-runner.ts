@@ -23,7 +23,6 @@ import { defaultRuntime } from "../../runtime.js";
 import {
   classifyAndLabel,
   postReplyStreamUpdate,
-  prependStreamLabel,
   type StreamLabelResult,
 } from "../../streams/label-injector.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
@@ -95,6 +94,15 @@ function extractUserText(raw: string): string {
     }
     // Skip "[Telegram ...] ..." envelope lines
     if (/^\[Telegram\s/.test(line)) {
+      continue;
+    }
+    // Skip reply context blocks: [Replying to ...] ... [/Replying]
+    if (/^\[Replying to\s/.test(line)) {
+      skipBlock = true;
+      continue;
+    }
+    if (skipBlock && line.trim() === "[/Replying]") {
+      skipBlock = false;
       continue;
     }
     // Skip conversation/sender metadata JSON blocks
@@ -786,12 +794,22 @@ export async function runReplyAgent(params: {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
     }
 
-    // Stream label: prepend to final payload (the definitive message sent to Telegram)
+    // Stream label: store on channelData for Telegram delivery layer to use.
+    // We do NOT prepend to the text here because:
+    // 1. Block streaming sends chunks that would duplicate the final message
+    // 2. The label in payload text gets saved to session history, causing
+    //    the model to learn and repeat the pattern
     if (streamLabelForReply && finalPayloads.length > 0) {
       const first = finalPayloads[0];
-      if (first && typeof first.text === "string" && first.text.trim() !== "") {
+      if (first) {
         finalPayloads = [
-          { ...first, text: prependStreamLabel(first.text, streamLabelForReply) },
+          {
+            ...first,
+            channelData: {
+              ...first.channelData,
+              streamLabel: streamLabelForReply,
+            },
+          },
           ...finalPayloads.slice(1),
         ];
       }

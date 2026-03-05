@@ -469,6 +469,12 @@ export const dispatchTelegramMessage = async ({
         ...prefixOptions,
         typingCallbacks,
         deliver: async (payload, info) => {
+          // Inject stream label only on the final delivery (not block streaming previews)
+          const streamLabel = payload.channelData?.streamLabel as string | undefined;
+          if (streamLabel && info.kind === "final" && payload.text) {
+            payload = { ...payload, text: `${streamLabel}\n\n${payload.text}` };
+          }
+
           const previewButtons = (
             payload.channelData?.telegram as { buttons?: TelegramInlineButtons } | undefined
           )?.buttons;
