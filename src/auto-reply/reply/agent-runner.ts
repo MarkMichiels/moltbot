@@ -70,31 +70,42 @@ const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
  * and inbound metadata blocks.
  */
 function extractUserText(raw: string): string {
-  let text = raw;
+  const lines = raw.split("\n");
+  const cleaned: string[] = [];
+  let skipBlock = false;
 
-  // Strip "[Platform Name id:xxx timestamp] <media:type>" prefix
-  text = text.replace(/^\[.*?\]\s*<media:[^>]+>\s*/s, "");
-
-  // Strip "Transcript:" or "User text:" prefix
-  text = text.replace(/^(?:Transcript|User text):\s*/i, "");
-
-  // Strip conversation info JSON blocks
-  text = text.replace(/^Conversation info \(untrusted metadata\):[\s\S]*?```\s*/m, "");
-
-  // Strip sender JSON blocks
-  text = text.replace(/^Sender \(untrusted metadata\):[\s\S]*?```\s*/m, "");
-
-  // Strip quoted transcript wrappers like: "here is the transcript:\n\"actual text\""
-  const transcriptMatch = text.match(
-    /(?:transcriptie van de audio|following is a transcript|hier is de transcriptie)[^"]*"([^"]+)"/i,
-  );
-  if (transcriptMatch?.[1]) {
-    text = transcriptMatch[1];
+  for (const line of lines) {
+    // Skip [Platform ...] <media:...> lines
+    if (line.match(/^\[.*?\]\s*<media:/)) {
+      continue;
+    }
+    // Skip "Transcript:" / "User text:" labels
+    if (/^(Transcript|User text):\s*$/i.test(line)) {
+      continue;
+    }
+    // Skip conversation/sender metadata JSON blocks
+    if (line.startsWith("Conversation info (") || line.startsWith("Sender (")) {
+      skipBlock = true;
+      continue;
+    }
+    if (skipBlock) {
+      if (line.trim() === "```") {
+        skipBlock = false;
+      }
+      continue;
+    }
+    // Skip transcript wrapper phrases
+    if (/transcriptie van de audio|following is a transcript|hier is de transcriptie/i.test(line)) {
+      continue;
+    }
+    cleaned.push(line);
   }
 
-  // Remove surrounding quotes if the whole thing is quoted
-  text = text.replace(/^[""](.+)[""]$/s, "$1");
-
+  let text = cleaned.join("\n").trim();
+  // Remove surrounding quotes
+  if (text.startsWith('"') && text.endsWith('"')) {
+    text = text.slice(1, -1);
+  }
   return text.trim();
 }
 
@@ -740,6 +751,9 @@ export async function runReplyAgent(params: {
     // Extract actual user text: strip envelope context like
     // "[Telegram ... ] <media:audio>\nTranscript:\n..." and inbound metadata
     const rawUserMessage = extractUserText(rawUserMessageFull);
+    console.error(
+      `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
+    );
     if (!isHeartbeat && rawUserMessage && sessionKey) {
       try {
         const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
