@@ -79,8 +79,21 @@ function extractUserText(raw: string): string {
     if (line.match(/^\[.*?\]\s*<media:/)) {
       continue;
     }
-    // Skip "Transcript:" / "User text:" labels
-    if (/^(Transcript|User text):\s*$/i.test(line)) {
+    // Skip "[Audio]", "[Image]", etc. media type markers
+    if (/^\[(Audio|Image|Video|Document|Sticker)\]$/i.test(line.trim())) {
+      continue;
+    }
+    // Skip "Transcript:" / "User text:" labels (with or without trailing content)
+    if (/^(Transcript|User text):\s*/i.test(line)) {
+      // If there's content after the label, keep it
+      const afterLabel = line.replace(/^(Transcript|User text):\s*/i, "").trim();
+      if (afterLabel) {
+        cleaned.push(afterLabel);
+      }
+      continue;
+    }
+    // Skip "[Telegram ...] ..." envelope lines
+    if (/^\[Telegram\s/.test(line)) {
       continue;
     }
     // Skip conversation/sender metadata JSON blocks
