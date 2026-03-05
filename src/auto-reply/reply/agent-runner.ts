@@ -64,6 +64,40 @@ import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
 
+/**
+ * Extract the actual user text from potentially wrapped messages.
+ * Strips envelope context like "[Telegram ...] <media:audio>\nTranscript:\n..."
+ * and inbound metadata blocks.
+ */
+function extractUserText(raw: string): string {
+  let text = raw;
+
+  // Strip "[Platform Name id:xxx timestamp] <media:type>" prefix
+  text = text.replace(/^\[.*?\]\s*<media:[^>]+>\s*/s, "");
+
+  // Strip "Transcript:" or "User text:" prefix
+  text = text.replace(/^(?:Transcript|User text):\s*/i, "");
+
+  // Strip conversation info JSON blocks
+  text = text.replace(/^Conversation info \(untrusted metadata\):[\s\S]*?```\s*/m, "");
+
+  // Strip sender JSON blocks
+  text = text.replace(/^Sender \(untrusted metadata\):[\s\S]*?```\s*/m, "");
+
+  // Strip quoted transcript wrappers like: "here is the transcript:\n\"actual text\""
+  const transcriptMatch = text.match(
+    /(?:transcriptie van de audio|following is a transcript|hier is de transcriptie)[^"]*"([^"]+)"/i,
+  );
+  if (transcriptMatch?.[1]) {
+    text = transcriptMatch[1];
+  }
+
+  // Remove surrounding quotes if the whole thing is quoted
+  text = text.replace(/^[""](.+)[""]$/s, "$1");
+
+  return text.trim();
+}
+
 export async function runReplyAgent(params: {
   commandBody: string;
   followupRun: FollowupRun;
@@ -697,12 +731,15 @@ export async function runReplyAgent(params: {
     // Stream label injection (post-processing, non-blocking)
     // Use raw user message for classification, not the enriched commandBody
     // which includes metadata, media notes, and other structural context
-    const rawUserMessage = (
+    const rawUserMessageFull = (
       sessionCtx.CommandBody ??
       sessionCtx.RawBody ??
       sessionCtx.Body ??
       ""
     ).trim();
+    // Extract actual user text: strip envelope context like
+    // "[Telegram ... ] <media:audio>\nTranscript:\n..." and inbound metadata
+    const rawUserMessage = extractUserText(rawUserMessageFull);
     if (!isHeartbeat && rawUserMessage && sessionKey) {
       try {
         const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
