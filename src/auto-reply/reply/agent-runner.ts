@@ -218,8 +218,53 @@ export async function runReplyAgent(params: {
   );
   const applyReplyToMode = createReplyToModeFilterForChannel(replyToMode, replyToChannel);
   const cfg = followupRun.run.config;
+
+  // --- Stream classification: must run BEFORE blockReplyPipeline creation ---
+  let streamLabelForReply: string | null = null;
+  let streamLabelResult: StreamLabelResult | null = null;
+  let resolvedStreamDir: string | undefined;
+  let labelPrepended = false;
+  const rawUserMessageFull = (
+    sessionCtx.BodyForAgent ??
+    sessionCtx.CommandBody ??
+    sessionCtx.RawBody ??
+    sessionCtx.Body ??
+    ""
+  ).trim();
+  const rawUserMessage = extractUserText(rawUserMessageFull);
+  console.error(
+    `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
+  );
+  if (!isHeartbeat && rawUserMessage && sessionKey) {
+    const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
+      | string
+      | undefined;
+    resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
+    try {
+      streamLabelResult = await classifyAndLabel(resolvedStreamDir, rawUserMessage);
+      streamLabelForReply = streamLabelResult?.label ?? null;
+    } catch {
+      // Classification is best-effort
+    }
+  }
+
+  // Wrap onBlockReply to prepend label to the first streamed chunk
+  const effectiveOnBlockReply =
+    streamLabelForReply && opts?.onBlockReply
+      ? (payload: ReplyPayload, context?: BlockReplyContext) => {
+          if (!labelPrepended && payload.text?.trim()) {
+            labelPrepended = true;
+            return opts.onBlockReply!(
+              { ...payload, text: prependStreamLabel(payload.text, streamLabelForReply) },
+              context,
+            );
+          }
+          return opts.onBlockReply!(payload, context);
+        }
+      : opts?.onBlockReply;
+
   const blockReplyCoalescing =
-    blockStreamingEnabled && opts?.onBlockReply
+    blockStreamingEnabled && effectiveOnBlockReply
       ? resolveEffectiveBlockStreamingConfig({
           cfg,
           provider: sessionCtx.Provider,
@@ -228,9 +273,9 @@ export async function runReplyAgent(params: {
         }).coalescing
       : undefined;
   const blockReplyPipeline =
-    blockStreamingEnabled && opts?.onBlockReply
+    blockStreamingEnabled && effectiveOnBlockReply
       ? createBlockReplyPipeline({
-          onBlockReply: opts.onBlockReply,
+          onBlockReply: effectiveOnBlockReply,
           timeoutMs: blockReplyTimeoutMs,
           coalescing: blockReplyCoalescing,
           buffer: createAudioAsVoiceBuffer({ isAudioPayload }),
@@ -396,59 +441,13 @@ export async function runReplyAgent(params: {
         `Role ordering conflict (${reason}). Restarting session ${sessionKey} -> ${nextSessionId}.`,
       cleanupTranscripts: true,
     });
-  // --- Stream classification: start early so label is ready for block streaming ---
-  let streamLabelForReply: string | null = null;
-  let streamLabelResult: StreamLabelResult | null = null;
-  let resolvedStreamDir: string | undefined;
-  const rawUserMessageFull = (
-    sessionCtx.BodyForAgent ??
-    sessionCtx.CommandBody ??
-    sessionCtx.RawBody ??
-    sessionCtx.Body ??
-    ""
-  ).trim();
-  const rawUserMessage = extractUserText(rawUserMessageFull);
-  console.error(
-    `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
-  );
-  if (!isHeartbeat && rawUserMessage && sessionKey) {
-    const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
-      | string
-      | undefined;
-    resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
-    // Fire classification (runs in parallel with model warm-up below)
-    const classifyPromise = classifyAndLabel(resolvedStreamDir, rawUserMessage).catch(() => null);
-    // Await it before model call — Haiku is ~360ms, fast enough
-    streamLabelResult = await classifyPromise;
-    streamLabelForReply = streamLabelResult?.label ?? null;
-  }
-  // Wrap onBlockReply to prepend label to the first chunk
-  let labelPrepended = false;
-  const originalOnBlockReply = opts?.onBlockReply;
-  const effectiveOpts =
-    streamLabelForReply && originalOnBlockReply && opts
-      ? {
-          ...opts,
-          onBlockReply: (payload: ReplyPayload, context?: BlockReplyContext) => {
-            if (!labelPrepended && payload.text?.trim()) {
-              labelPrepended = true;
-              return originalOnBlockReply(
-                { ...payload, text: prependStreamLabel(payload.text, streamLabelForReply) },
-                context,
-              );
-            }
-            return originalOnBlockReply(payload, context);
-          },
-        }
-      : opts;
-
   try {
     const runStartedAt = Date.now();
     const runOutcome = await runAgentTurnWithFallback({
       commandBody,
       followupRun,
       sessionCtx,
-      opts: effectiveOpts,
+      opts,
       typingSignals,
       blockReplyPipeline,
       blockStreamingEnabled,
