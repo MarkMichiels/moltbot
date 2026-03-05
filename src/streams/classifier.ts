@@ -28,21 +28,30 @@ function buildClassificationPrompt(streams: Stream[], userMessage: string): stri
     return `${i + 1}. "${s.title}" [status: ${s.status}, ${age}] - ${s.summary}`;
   });
 
+  // Find the most recently updated stream as conversational context
+  const sortedByRecency = [...streams].toSorted(
+    (a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime(),
+  );
+  const mostRecent = sortedByRecency[0];
+  const recentIdx = streams.indexOf(mostRecent) + 1;
+
   return [
     "You classify user messages into conversation streams. Consider message content, keywords, stream status, and recency.",
     "",
     "Active streams:",
     ...streamLines,
     "",
+    `Most recent conversation: stream ${recentIdx} ("${mostRecent.title}")`,
+    "",
     `User message: "${userMessage}"`,
     "",
     "Which stream does this belong to? Consider:",
+    "- Short follow-up messages (ok, ja, test, lukt het?, etc.) usually continue the MOST RECENT stream",
     "- Message content and keywords matching stream topics",
     "- Stream status (waiting/waiting_review = likely needs follow-up)",
-    "- Recency matters but is not the only factor",
-    "- Ambiguous short messages like 'is dat gelukt?' likely refer to streams with uncertain outcomes",
+    "- Only classify as NEW if the message clearly introduces a different, unrelated topic",
     "",
-    "Reply with ONLY the stream number (e.g. '1') or 'NEW' if it doesn't match any stream.",
+    "Reply with ONLY the stream number (e.g. '1') or 'NEW' if it clearly doesn't match any stream.",
   ].join("\n");
 }
 
