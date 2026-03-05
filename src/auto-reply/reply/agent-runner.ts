@@ -695,13 +695,21 @@ export async function runReplyAgent(params: {
     }
 
     // Stream label injection (post-processing, non-blocking)
-    if (!isHeartbeat && commandBody && sessionKey) {
+    // Use raw user message for classification, not the enriched commandBody
+    // which includes metadata, media notes, and other structural context
+    const rawUserMessage = (
+      sessionCtx.CommandBody ??
+      sessionCtx.RawBody ??
+      sessionCtx.Body ??
+      ""
+    ).trim();
+    if (!isHeartbeat && rawUserMessage && sessionKey) {
       try {
         const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
           | string
           | undefined;
         const resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
-        const labelResult = await classifyAndLabel(resolvedStreamDir, commandBody);
+        const labelResult = await classifyAndLabel(resolvedStreamDir, rawUserMessage);
         if (labelResult.label && finalPayloads.length > 0) {
           const first = finalPayloads[0];
           if (first && typeof first.text === "string" && first.text.trim() !== "") {
@@ -720,7 +728,7 @@ export async function runReplyAgent(params: {
             .join("\n")
             .slice(0, 500) || "";
         if (replyText) {
-          postReplyStreamUpdate(resolvedStreamDir, commandBody, replyText, labelResult).catch(
+          postReplyStreamUpdate(resolvedStreamDir, rawUserMessage, replyText, labelResult).catch(
             () => {},
           );
         }
