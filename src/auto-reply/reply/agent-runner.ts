@@ -20,6 +20,7 @@ import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnosti
 import { generateSecureUuid } from "../../infra/secure-random.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { defaultRuntime } from "../../runtime.js";
+import { classifyAndLabel, prependStreamLabel } from "../../streams/label-injector.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import {
   buildFallbackClearedNotice,
@@ -687,6 +688,25 @@ export async function runReplyAgent(params: {
     }
     if (responseUsageLine) {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
+    }
+
+    // Stream label injection (post-processing, non-blocking)
+    if (!isHeartbeat && commandBody && sessionKey) {
+      try {
+        const workspaceDir = process.cwd();
+        const labelResult = await classifyAndLabel(workspaceDir, commandBody);
+        if (labelResult.label && finalPayloads.length > 0) {
+          const first = finalPayloads[0];
+          if (first && typeof first.text === "string" && first.text.trim() !== "") {
+            finalPayloads = [
+              { ...first, text: prependStreamLabel(first.text, labelResult.label) },
+              ...finalPayloads.slice(1),
+            ];
+          }
+        }
+      } catch {
+        // Stream labeling is best-effort — never block reply delivery
+      }
     }
 
     return finalizeWithFollowup(
