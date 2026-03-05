@@ -7,6 +7,7 @@ const log = createSubsystemLogger("streams/classifier");
 
 const CLASSIFIER_MODEL = "claude-3-haiku-20240307";
 const CLASSIFIER_MAX_TOKENS = 16;
+const SYNTHESIZER_MAX_TOKENS = 150;
 const CLASSIFIER_TIMEOUT_MS = 5_000;
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 
@@ -178,6 +179,143 @@ async function classifyWithHaiku(
     return { streamIndex: null, isNew: true, confidence: "low" };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export type StreamSynthesis = {
+  title: string;
+  keywords: string[];
+  summary: string;
+};
+
+/**
+ * Use Haiku to synthesize a stream title, keywords, and summary from a
+ * user message + assistant response pair.
+ */
+export async function synthesizeStream(
+  userMessage: string,
+  assistantResponse: string,
+  agentDir?: string,
+): Promise<StreamSynthesis | null> {
+  try {
+    const apiKey = await resolveAnthropicApiKey(agentDir);
+    if (!apiKey) {
+      return null;
+    }
+
+    const prompt = [
+      "Given this conversation exchange, create a short topic label for tracking.",
+      "",
+      `User: "${userMessage.slice(0, 300)}"`,
+      `Assistant: "${assistantResponse.slice(0, 300)}"`,
+      "",
+      "Reply with ONLY valid JSON (no markdown):",
+      '{"title": "Short descriptive title (max 6 words)", "keywords": ["keyword1", "keyword2", "keyword3"], "summary": "One sentence summary of the topic"}',
+    ].join("\n");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CLASSIFIER_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: CLASSIFIER_MODEL,
+          max_tokens: SYNTHESIZER_MAX_TOKENS,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+
+      const text = data.content?.[0]?.text?.trim() ?? "";
+      const parsed = JSON.parse(text) as StreamSynthesis;
+
+      if (parsed.title && Array.isArray(parsed.keywords)) {
+        log.info("Stream synthesized", { title: parsed.title });
+        return parsed;
+      }
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err) {
+    log.warn("Stream synthesis failed", { error: err });
+    return null;
+  }
+}
+
+/**
+ * Use Haiku to update a stream summary based on new conversation context.
+ */
+export async function updateStreamSummary(
+  stream: Stream,
+  userMessage: string,
+  assistantResponse: string,
+  agentDir?: string,
+): Promise<string | null> {
+  try {
+    const apiKey = await resolveAnthropicApiKey(agentDir);
+    if (!apiKey) {
+      return null;
+    }
+
+    const prompt = [
+      `Current topic: "${stream.title}"`,
+      `Current summary: "${stream.summary}"`,
+      "",
+      `New exchange:`,
+      `User: "${userMessage.slice(0, 200)}"`,
+      `Assistant: "${assistantResponse.slice(0, 200)}"`,
+      "",
+      "Write an updated one-sentence summary incorporating the new information. Reply with ONLY the summary text, no quotes.",
+    ].join("\n");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CLASSIFIER_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: CLASSIFIER_MODEL,
+          max_tokens: SYNTHESIZER_MAX_TOKENS,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+
+      return data.content?.[0]?.text?.trim() ?? null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return null;
   }
 }
 

@@ -20,7 +20,11 @@ import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnosti
 import { generateSecureUuid } from "../../infra/secure-random.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { defaultRuntime } from "../../runtime.js";
-import { classifyAndLabel, prependStreamLabel } from "../../streams/label-injector.js";
+import {
+  classifyAndLabel,
+  postReplyStreamUpdate,
+  prependStreamLabel,
+} from "../../streams/label-injector.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import {
   buildFallbackClearedNotice,
@@ -706,6 +710,19 @@ export async function runReplyAgent(params: {
               ...finalPayloads.slice(1),
             ];
           }
+        }
+
+        // Post-reply: create new streams or update existing ones (fire-and-forget)
+        const replyText =
+          finalPayloads
+            .map((p) => p.text ?? "")
+            .filter(Boolean)
+            .join("\n")
+            .slice(0, 500) || "";
+        if (replyText) {
+          postReplyStreamUpdate(resolvedStreamDir, commandBody, replyText, labelResult).catch(
+            () => {},
+          );
         }
       } catch {
         // Stream labeling is best-effort — never block reply delivery
