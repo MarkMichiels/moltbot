@@ -223,10 +223,12 @@ function classifyByKeywords(streams: Stream[], userMessage: string): Classificat
     }
   }
 
-  if (bestScore >= 3) {
+  // High confidence requires strong keyword evidence (multiple distinct matches)
+  // to avoid bypassing the Haiku LLM classifier on weak signals
+  if (bestScore >= 6) {
     return { streamIndex: bestIndex, isNew: false, confidence: "high", latencyMs: 0 };
   }
-  if (bestScore >= 1) {
+  if (bestScore >= 2) {
     return { streamIndex: bestIndex, isNew: false, confidence: "low", latencyMs: 0 };
   }
 
