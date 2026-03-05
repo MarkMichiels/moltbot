@@ -6,6 +6,7 @@ import { openBoundaryFile } from "../infra/boundary-file-read.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
+import { loadStreams, type ActiveStreamsStore } from "../streams/manager.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
 
@@ -652,4 +653,18 @@ export async function loadExtraBootstrapFilesWithDiagnostics(
     });
   }
   return { files, diagnostics };
+}
+
+/**
+ * Load active topic streams for a workspace directory.
+ * Returns null if streams file doesn't exist or fails to load (non-fatal).
+ */
+export async function loadWorkspaceStreams(dir: string): Promise<ActiveStreamsStore | null> {
+  const resolvedDir = resolveUserPath(dir);
+  try {
+    const store = await loadStreams(resolvedDir);
+    return store.streams.length > 0 ? store : null;
+  } catch {
+    return null;
+  }
 }
