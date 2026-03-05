@@ -693,8 +693,8 @@ export async function runReplyAgent(params: {
     // Stream label injection (post-processing, non-blocking)
     if (!isHeartbeat && commandBody && sessionKey) {
       try {
-        const workspaceDir = process.cwd();
-        const labelResult = await classifyAndLabel(workspaceDir, commandBody);
+        const streamWorkspaceDir = cfg.agents?.defaults?.workspace?.trim() || process.cwd();
+        const labelResult = await classifyAndLabel(streamWorkspaceDir, commandBody);
         if (labelResult.label && finalPayloads.length > 0) {
           const first = finalPayloads[0];
           if (first && typeof first.text === "string" && first.text.trim() !== "") {
