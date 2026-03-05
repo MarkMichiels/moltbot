@@ -34,7 +34,7 @@ import {
 } from "../fallback-state.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import { resolveResponseUsageMode, type VerboseLevel } from "../thinking.js";
-import type { BlockReplyContext, GetReplyOptions, ReplyPayload } from "../types.js";
+import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runAgentTurnWithFallback } from "./agent-runner-execution.js";
 import {
   createShouldEmitToolOutput,
@@ -223,7 +223,7 @@ export async function runReplyAgent(params: {
   let streamLabelForReply: string | null = null;
   let streamLabelResult: StreamLabelResult | null = null;
   let resolvedStreamDir: string | undefined;
-  let labelPrepended = false;
+
   const rawUserMessageFull = (
     sessionCtx.BodyForAgent ??
     sessionCtx.CommandBody ??
@@ -248,23 +248,11 @@ export async function runReplyAgent(params: {
     }
   }
 
-  // Wrap onBlockReply to prepend label to the first streamed chunk
-  const effectiveOnBlockReply =
-    streamLabelForReply && opts?.onBlockReply
-      ? (payload: ReplyPayload, context?: BlockReplyContext) => {
-          if (!labelPrepended && payload.text?.trim()) {
-            labelPrepended = true;
-            return opts.onBlockReply!(
-              { ...payload, text: prependStreamLabel(payload.text, streamLabelForReply) },
-              context,
-            );
-          }
-          return opts.onBlockReply!(payload, context);
-        }
-      : opts?.onBlockReply;
+  // Stream label is prepended to finalPayloads only (not streaming chunks)
+  // Block streaming chunks are temporary previews that get replaced by the final message
 
   const blockReplyCoalescing =
-    blockStreamingEnabled && effectiveOnBlockReply
+    blockStreamingEnabled && opts?.onBlockReply
       ? resolveEffectiveBlockStreamingConfig({
           cfg,
           provider: sessionCtx.Provider,
@@ -273,9 +261,9 @@ export async function runReplyAgent(params: {
         }).coalescing
       : undefined;
   const blockReplyPipeline =
-    blockStreamingEnabled && effectiveOnBlockReply
+    blockStreamingEnabled && opts?.onBlockReply
       ? createBlockReplyPipeline({
-          onBlockReply: effectiveOnBlockReply,
+          onBlockReply: opts.onBlockReply,
           timeoutMs: blockReplyTimeoutMs,
           coalescing: blockReplyCoalescing,
           buffer: createAudioAsVoiceBuffer({ isAudioPayload }),
@@ -798,8 +786,8 @@ export async function runReplyAgent(params: {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
     }
 
-    // Stream label: prepend to final payload only if NOT already prepended via block streaming
-    if (streamLabelForReply && !labelPrepended && finalPayloads.length > 0) {
+    // Stream label: prepend to final payload (the definitive message sent to Telegram)
+    if (streamLabelForReply && finalPayloads.length > 0) {
       const first = finalPayloads[0];
       if (first && typeof first.text === "string" && first.text.trim() !== "") {
         finalPayloads = [
