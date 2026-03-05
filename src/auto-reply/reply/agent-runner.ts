@@ -743,6 +743,7 @@ export async function runReplyAgent(params: {
     // Use raw user message for classification, not the enriched commandBody
     // which includes metadata, media notes, and other structural context
     const rawUserMessageFull = (
+      sessionCtx.BodyForAgent ??
       sessionCtx.CommandBody ??
       sessionCtx.RawBody ??
       sessionCtx.Body ??
@@ -752,7 +753,7 @@ export async function runReplyAgent(params: {
     // "[Telegram ... ] <media:audio>\nTranscript:\n..." and inbound metadata
     const rawUserMessage = extractUserText(rawUserMessageFull);
     console.error(
-      `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
+      `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey} bodyStart="${rawUserMessageFull.slice(0, 120)}" cmdBody=${!!sessionCtx.CommandBody} rawBody=${!!sessionCtx.RawBody} body=${!!sessionCtx.Body}`,
     );
     if (!isHeartbeat && rawUserMessage && sessionKey) {
       try {
