@@ -20,11 +20,6 @@ import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnosti
 import { generateSecureUuid } from "../../infra/secure-random.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { defaultRuntime } from "../../runtime.js";
-import {
-  classifyAndLabel,
-  postReplyStreamUpdate,
-  type StreamLabelResult,
-} from "../../streams/label-injector.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
 import {
   buildFallbackClearedNotice,
@@ -57,79 +52,13 @@ import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-r
 import { readPostCompactionContext } from "./post-compaction-context.js";
 import { resolveActiveRunQueueAction } from "./queue-policy.js";
 import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
+import { createReplyMediaPathNormalizer } from "./reply-media-paths.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
-
-/**
- * Extract the actual user text from potentially wrapped messages.
- * Strips envelope context like "[Telegram ...] <media:audio>\nTranscript:\n..."
- * and inbound metadata blocks.
- */
-function extractUserText(raw: string): string {
-  const lines = raw.split("\n");
-  const cleaned: string[] = [];
-  let skipBlock = false;
-
-  for (const line of lines) {
-    // Skip [Platform ...] <media:...> lines
-    if (line.match(/^\[.*?\]\s*<media:/)) {
-      continue;
-    }
-    // Skip "[Audio]", "[Image]", etc. media type markers
-    if (/^\[(Audio|Image|Video|Document|Sticker)\]$/i.test(line.trim())) {
-      continue;
-    }
-    // Skip "Transcript:" / "User text:" labels (with or without trailing content)
-    if (/^(Transcript|User text):\s*/i.test(line)) {
-      // If there's content after the label, keep it
-      const afterLabel = line.replace(/^(Transcript|User text):\s*/i, "").trim();
-      if (afterLabel) {
-        cleaned.push(afterLabel);
-      }
-      continue;
-    }
-    // Skip "[Telegram ...] ..." envelope lines
-    if (/^\[Telegram\s/.test(line)) {
-      continue;
-    }
-    // Skip reply context blocks: [Replying to ...] ... [/Replying]
-    if (/^\[Replying to\s/.test(line)) {
-      skipBlock = true;
-      continue;
-    }
-    if (skipBlock && line.trim() === "[/Replying]") {
-      skipBlock = false;
-      continue;
-    }
-    // Skip conversation/sender metadata JSON blocks
-    if (line.startsWith("Conversation info (") || line.startsWith("Sender (")) {
-      skipBlock = true;
-      continue;
-    }
-    if (skipBlock) {
-      if (line.trim() === "```") {
-        skipBlock = false;
-      }
-      continue;
-    }
-    // Skip transcript wrapper phrases
-    if (/transcriptie van de audio|following is a transcript|hier is de transcriptie/i.test(line)) {
-      continue;
-    }
-    cleaned.push(line);
-  }
-
-  let text = cleaned.join("\n").trim();
-  // Remove surrounding quotes
-  if (text.startsWith('"') && text.endsWith('"')) {
-    text = text.slice(1, -1);
-  }
-  return text.trim();
-}
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -226,39 +155,11 @@ export async function runReplyAgent(params: {
   );
   const applyReplyToMode = createReplyToModeFilterForChannel(replyToMode, replyToChannel);
   const cfg = followupRun.run.config;
-
-  // --- Stream classification: must run BEFORE blockReplyPipeline creation ---
-  let streamLabelForReply: string | null = null;
-  let streamLabelResult: StreamLabelResult | null = null;
-  let resolvedStreamDir: string | undefined;
-
-  const rawUserMessageFull = (
-    sessionCtx.BodyForAgent ??
-    sessionCtx.CommandBody ??
-    sessionCtx.RawBody ??
-    sessionCtx.Body ??
-    ""
-  ).trim();
-  const rawUserMessage = extractUserText(rawUserMessageFull);
-  console.error(
-    `[streams/debug] pre-classify: bodyLen=${rawUserMessageFull.length} extracted="${rawUserMessage.slice(0, 80)}" isHeartbeat=${isHeartbeat} hasKey=${!!sessionKey}`,
-  );
-  if (!isHeartbeat && rawUserMessage && sessionKey) {
-    const streamWorkspaceDir = (cfg.agents?.defaults as Record<string, unknown>)?.workspace as
-      | string
-      | undefined;
-    resolvedStreamDir = streamWorkspaceDir?.trim() || process.cwd();
-    try {
-      streamLabelResult = await classifyAndLabel(resolvedStreamDir, rawUserMessage);
-      streamLabelForReply = streamLabelResult?.label ?? null;
-    } catch {
-      // Classification is best-effort
-    }
-  }
-
-  // Stream label is prepended to finalPayloads only (not streaming chunks)
-  // Block streaming chunks are temporary previews that get replaced by the final message
-
+  const normalizeReplyMediaPaths = createReplyMediaPathNormalizer({
+    cfg,
+    sessionKey,
+    workspaceDir: followupRun.run.workspaceDir,
+  });
   const blockReplyCoalescing =
     blockStreamingEnabled && opts?.onBlockReply
       ? resolveEffectiveBlockStreamingConfig({
@@ -580,7 +481,7 @@ export async function runReplyAgent(params: {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
-    const payloadResult = buildReplyPayloads({
+    const payloadResult = await buildReplyPayloads({
       payloads: payloadArray,
       isHeartbeat,
       didLogHeartbeatStrip,
@@ -600,6 +501,7 @@ export async function runReplyAgent(params: {
         to: sessionCtx.To,
       }),
       accountId: sessionCtx.AccountId,
+      normalizeMediaPaths: normalizeReplyMediaPaths,
     });
     const { replyPayloads } = payloadResult;
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
@@ -771,7 +673,7 @@ export async function runReplyAgent(params: {
       // Inject post-compaction workspace context for the next agent turn
       if (sessionKey) {
         const workspaceDir = process.cwd();
-        readPostCompactionContext(workspaceDir)
+        readPostCompactionContext(workspaceDir, cfg)
           .then((contextContent) => {
             if (contextContent) {
               enqueueSystemEvent(contextContent, { sessionKey });
@@ -792,45 +694,6 @@ export async function runReplyAgent(params: {
     }
     if (responseUsageLine) {
       finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
-    }
-
-    // Stream label: store on channelData for Telegram delivery layer to use.
-    // We do NOT prepend to the text here because:
-    // 1. Block streaming sends chunks that would duplicate the final message
-    // 2. The label in payload text gets saved to session history, causing
-    //    the model to learn and repeat the pattern
-    if (streamLabelForReply && finalPayloads.length > 0) {
-      const first = finalPayloads[0];
-      if (first) {
-        finalPayloads = [
-          {
-            ...first,
-            channelData: {
-              ...first.channelData,
-              streamLabel: streamLabelForReply,
-            },
-          },
-          ...finalPayloads.slice(1),
-        ];
-      }
-    }
-
-    // Post-reply: create new streams or update existing ones (fire-and-forget)
-    if (resolvedStreamDir && streamLabelResult) {
-      const replyText =
-        finalPayloads
-          .map((p) => p.text ?? "")
-          .filter(Boolean)
-          .join("\n")
-          .slice(0, 500) || "";
-      if (replyText) {
-        postReplyStreamUpdate(
-          resolvedStreamDir,
-          rawUserMessage,
-          replyText,
-          streamLabelResult,
-        ).catch(() => {});
-      }
     }
 
     return finalizeWithFollowup(
