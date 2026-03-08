@@ -1,75 +1,9 @@
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
 import { isFileMissingError } from "./fs-utils.js";
-
-// =============================================================================
-// LOCAL FORK MODIFICATION: Symlink Allowlist Support
-// =============================================================================
-// Upstream moltbot skips all symlinks for security reasons.
-// We need symlinks to avoid duplicating ~3000 markdown files across repos.
-//
-// This modification:
-// 1. Reads allowlist from ~/.clawdbot/memory-symlinks-allowed.json
-// 2. Only follows symlinks whose targets are explicitly listed
-// 3. Rejects all other symlinks (maintains security for unknown symlinks)
-//
-// Config format:
-// {
-//   "allowedTargets": [
-//     "/home/mark/Repositories/proviron/docs",
-//     "/home/mark/Repositories/mark-private/private/..."
-//   ]
-// }
-//
-// IMPORTANT: Preserve this code block when merging upstream updates!
-// Documentation: mark-private/private/docs/moltbot_setup.md
-// =============================================================================
-
-let _symlinkAllowlist: Set<string> | null = null;
-
-// [LOCAL FORK] Load symlink allowlist from config file
-function loadSymlinkAllowlist(): Set<string> {
-  if (_symlinkAllowlist !== null) return _symlinkAllowlist;
-  _symlinkAllowlist = new Set();
-  try {
-    const configPath = path.join(os.homedir(), ".clawdbot", "memory-symlinks-allowed.json");
-    const content = fsSync.readFileSync(configPath, "utf-8");
-    const config = JSON.parse(content);
-    if (Array.isArray(config.allowedTargets)) {
-      for (const target of config.allowedTargets) {
-        if (typeof target === "string") {
-          // Normalize and resolve the path
-          _symlinkAllowlist.add(path.resolve(target));
-        }
-      }
-    }
-  } catch {
-    // No config or invalid - empty allowlist means no symlinks followed
-  }
-  return _symlinkAllowlist;
-}
-
-// [LOCAL FORK] Check if symlink target is in allowlist
-function isSymlinkAllowed(symlinkPath: string): boolean {
-  const allowlist = loadSymlinkAllowlist();
-  if (allowlist.size === 0) return false;
-  try {
-    const realTarget = fsSync.realpathSync(symlinkPath);
-    // Check if target starts with any allowed path
-    for (const allowed of allowlist) {
-      if (realTarget === allowed || realTarget.startsWith(allowed + path.sep)) {
-        return true;
-      }
-    }
-  } catch {
-    // Broken symlink
-  }
-  return false;
-}
 
 export type MemoryFileEntry = {
   path: string;
@@ -122,46 +56,17 @@ export function isMemoryPath(relPath: string): boolean {
   return normalized.startsWith("memory/");
 }
 
-// [LOCAL FORK] Modified walkDir to support allowlisted symlinks
-// Upstream version skips ALL symlinks; our version follows ONLY allowlisted ones
 async function walkDir(dir: string, files: string[]) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-
-    // [LOCAL FORK] Handle symlinks: only follow if target is in allowlist
     if (entry.isSymbolicLink()) {
-      if (!isSymlinkAllowed(full)) {
-        // Security: skip symlinks not in allowlist (upstream behavior)
-        continue;
-      }
-      try {
-        const stat = await fs.stat(full);
-        if (stat.isDirectory()) {
-          await walkDir(full, files);
-          continue;
-        }
-        if (!stat.isFile()) {
-          continue;
-        }
-        if (!entry.name.endsWith(".md")) {
-          continue;
-        }
-        files.push(full);
-        continue;
-      } catch {
-        // Broken symlink — skip
-        continue;
-      }
+      continue;
     }
-
-    // Handle regular directories
     if (entry.isDirectory()) {
       await walkDir(full, files);
       continue;
     }
-
-    // Handle regular files
     if (!entry.isFile()) {
       continue;
     }
