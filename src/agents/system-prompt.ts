@@ -2,8 +2,6 @@ import { createHmac, createHash } from "node:crypto";
 import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import type { MemoryCitationsMode } from "../config/types.memory.js";
-import type { Stream } from "../streams/manager.js";
-import { formatStreamsForPrompt } from "../streams/manager.js";
 import { listDeliverableMessageChannels } from "../utils/message-channel.js";
 import type { ResolvedTimeFormat } from "./date-time.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
@@ -235,8 +233,6 @@ export function buildAgentSystemPrompt(params: {
     channel: string;
   };
   memoryCitationsMode?: MemoryCitationsMode;
-  /** Active topic streams for context-aware replies (Phase 1+2). */
-  activeStreams?: Stream[];
 }) {
   const acpEnabled = params.acpEnabled !== false;
   const sandboxedRuntime = params.sandboxInfo?.enabled === true;
@@ -513,9 +509,6 @@ export function buildAgentSystemPrompt(params: {
     workspaceGuidance,
     ...workspaceNotes,
     "",
-    ...((params.activeStreams?.length ?? 0) > 0
-      ? [formatStreamsForPrompt(params.activeStreams!)]
-      : []),
     ...docsSection,
     params.sandboxInfo?.enabled ? "## Sandbox" : "",
     params.sandboxInfo?.enabled
